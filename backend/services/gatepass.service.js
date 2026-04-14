@@ -1,249 +1,165 @@
 const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
-/**
- * Creates a new gate pass request for a student.
- * Blocks requests made between 9:00 PM and 6:00 AM server time.
- */
-function requestPass(studentId, reason, expectedOut, expectedReturn) {
-  const now = new Date();
-  const currentHour = now.getHours();
-
+async function requestPass(studentId, reason, expectedOut, expectedReturn) {
+  const currentHour = new Date().getHours();
   if (currentHour >= 21 || currentHour < 6) {
-    throw { status: 403, message: 'Gate pass requests are not allowed between 9:00 PM and 6:00 AM.' };
+    throw { status: 403, message: 'Gate pass requests are blocked between 9:00 PM and 6:00 AM.' };
   }
 
-  // Validate dates
-  const outTime = new Date(expectedOut);
-  const returnTime = new Date(expectedReturn);
+  const [users] = await db.execute('SELECT hostel_id FROM users WHERE id = ?', [studentId]);
+  const hostelId = users[0].hostel_id;
 
-  if (outTime < now) {
-    throw { status: 400, message: 'Expected exit time cannot be in the past.' };
-  }
-
-  if (returnTime <= outTime) {
-    throw { status: 400, message: 'Expected return time must be strictly after expected exit time.' };
-  }
-
-  const student = db.prepare(`SELECT hostel_id FROM users WHERE id = ? AND role = 'student'`).get(studentId);
-  if (!student) throw { status: 404, message: 'Student not found.' };
-
-  // Check if there are any active/pending passes right now to prevent abuse
-  const activeCount = db.prepare(`
-    SELECT COUNT(*) as cnt FROM gate_passes 
-    WHERE student_id = ? AND status IN ('pending', 'approved', 'active')
-  `).get(studentId).cnt;
-
-  if (activeCount > 0) {
-    throw { status: 409, message: 'You already have an ongoing or pending gate pass.' };
-  }
-
-  const result = db.prepare(`
+  const [result] = await db.execute(`
     INSERT INTO gate_passes (student_id, reason, expected_out, expected_return, hostel_id)
     VALUES (?, ?, ?, ?, ?)
-  `).run(studentId, reason, expectedOut, expectedReturn, student.hostel_id);
+  `, [studentId, reason, expectedOut, expectedReturn, hostelId]);
 
-  // Note: We'd typically dispatch a real-time event or push notification here if we had Warden's active socket.
-  return { id: result.lastInsertRowid, status: 'pending' };
+  return { id: result.insertId, status: 'pending' };
 }
 
-/**
- * Approves or rejects a pending gate pass.
- * If approved, a secure UUID qr_token is generated for the security scanner.
- */
-function updatePassStatus(passId, wardenId, status, note, io) {
-  const allowedStatuses = ['approved', 'rejected'];
-  if (!allowedStatuses.includes(status)) {
-    throw { status: 400, message: 'Invalid status update command.' };
-  }
-
-  const pass = db.prepare(`SELECT * FROM gate_passes WHERE id = ?`).get(passId);
-  if (!pass) throw { status: 404, message: 'Pass not found.' };
-  if (pass.status !== 'pending') throw { status: 400, message: `Cannot modify pass. Current status is ${pass.status}.` };
-
-  const warden = db.prepare(`SELECT hostel_id FROM users WHERE id = ? AND role = 'warden'`).get(wardenId);
-  if (!warden || warden.hostel_id !== pass.hostel_id) {
-    throw { status: 403, message: 'Unauthorized permission for this hostel.' };
-  }
-
+async function updatePassStatus(passId, wardenId, status, approvalNote = '') {
   let qrToken = null;
   if (status === 'approved') {
-    qrToken = uuidv4(); // Never sequential or guessable integers
+    qrToken = uuidv4();
   }
 
-  db.prepare(`
+  await db.execute(`
     UPDATE gate_passes 
     SET status = ?, approved_by = ?, approval_note = ?, qr_token = ?
     WHERE id = ?
-  `).run(status, wardenId, note || null, qrToken, passId);
+  `, [status, wardenId, approvalNote, qrToken, passId]);
 
-  db.prepare(`
+  const [passes] = await db.execute('SELECT student_id, hostel_id FROM gate_passes WHERE id = ?', [passId]);
+  const pass = passes[0];
+
+  await db.execute(`
     INSERT INTO logs (actor_id, action, target_user_id, gate_pass_id, hostel_id)
     VALUES (?, ?, ?, ?, ?)
-  `).run(wardenId, `PASS_${status.toUpperCase()}`, pass.student_id, passId, pass.hostel_id);
+  `, [wardenId, `SET_PASS_${status.toUpperCase()}`, pass.student_id, passId, pass.hostel_id]);
 
   return { passId, status, qrToken };
 }
 
-/**
- * Handles security scanning the pass QR code.
- */
-function scanPass(qrToken, scanAction) {
+async function scanPass(qrToken, scanAction) {
   if (!qrToken) throw { status: 400, message: 'QR token required.' };
 
-  const pass = db.prepare(`
-    SELECT gp.*, u.name as student_name, u.room_no
+  const [passes] = await db.execute(`
+    SELECT gp.*, u.name as student_name
     FROM gate_passes gp
     JOIN users u ON gp.student_id = u.id
     WHERE gp.qr_token = ?
-  `).get(qrToken);
+  `, [qrToken]);
+  const pass = passes[0];
 
   if (!pass) {
     throw { status: 404, message: 'Invalid or expired QR token.' };
   }
 
-  const now = new Date().toISOString();
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
   if (scanAction === 'exit') {
     if (pass.status !== 'approved') {
-      throw { status: 400, message: `Exit denied. Pass status is ${pass.status}.` };
+      throw { status: 400, message: `Pass cannot be used for exit. Current status: ${pass.status}` };
     }
-
-    db.prepare(`
+    
+    await db.execute(`
       UPDATE gate_passes 
       SET status = 'active', exit_scanned_at = ?
       WHERE id = ?
-    `).run(now, pass.id);
-
-    return { success: true, message: 'Exit granted', student: pass.student_name, status: 'active' };
+    `, [now, pass.id]);
+    
+    return { message: 'Exit granted', student: pass.student_name, status: 'active' };
 
   } else if (scanAction === 'return') {
     if (pass.status !== 'active' && pass.status !== 'overdue') {
-      throw { status: 400, message: `Entry denied/Irregular state. Pass status is ${pass.status}.` };
+      throw { status: 400, message: `Pass cannot be used for return. Current status: ${pass.status}` };
     }
 
-    db.prepare(`
+    await db.execute(`
       UPDATE gate_passes 
       SET status = 'closed', return_scanned_at = ?
       WHERE id = ?
-    `).run(now, pass.id);
+    `, [now, pass.id]);
 
-    return { success: true, message: 'Return recorded', student: pass.student_name, status: 'closed' };
+    return { message: 'Return recorded', student: pass.student_name, status: 'closed' };
+
+  } else {
+    throw { status: 400, message: 'Invalid scan action. Must be exit or return.' };
   }
-
-  throw { status: 400, message: 'Invalid action (exit or return required).' };
 }
 
-/**
- * Get all passes for a specific student.
- */
-function getStudentPasses(studentId) {
-  return db.prepare(`
-    SELECT * FROM gate_passes 
-    WHERE student_id = ?
-    ORDER BY requested_at DESC
-  `).all(studentId);
+async function getStudentPasses(studentId) {
+  const [passes] = await db.execute(`
+    SELECT * FROM gate_passes WHERE student_id = ? ORDER BY requested_at DESC
+  `, [studentId]);
+  return passes;
 }
 
-/**
- * Get active/recent passes for the Warden Dashboard.
- */
-function getWardenPasses(hostelId) {
-  return db.prepare(`
-    SELECT gp.*, u.name as student_name, u.room_no 
+async function getWardenPasses(hostelId) {
+  const [passes] = await db.execute(`
+    SELECT gp.*, u.name as student_name, u.room_no
     FROM gate_passes gp
     JOIN users u ON gp.student_id = u.id
-    WHERE gp.hostel_id = ? 
-    ORDER BY 
-      CASE status
-        WHEN 'pending' THEN 1
-        WHEN 'overdue' THEN 2
-        WHEN 'active' THEN 3
-        WHEN 'approved' THEN 4
-        WHEN 'unresolved' THEN 5
-        ELSE 6
-      END,
-      gp.requested_at DESC
-  `).all(hostelId);
+    WHERE gp.hostel_id = ?
+    ORDER BY gp.requested_at DESC
+  `, [hostelId]);
+  return passes;
 }
 
-/**
- * Scheduled job: Runs every 15 minutes to flag overdue passes.
- */
-function processOverdue() {
+async function processOverdue(io) {
   console.log('[GatePass Service] Checking for overdue passes...');
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
   
-  const now = new Date();
-  const threshold = new Date(now.getTime() - 30 * 60 * 1000).toISOString(); // Expected return + 30 mins
+  const [passesToUpdate] = await db.execute(`
+    SELECT id, hostel_id FROM gate_passes 
+    WHERE status = 'active' AND expected_return < ?
+  `, [now]);
 
-  const overduePasses = db.prepare(`
-    SELECT id, student_id, hostel_id FROM gate_passes 
-    WHERE status = 'active' AND expected_return <= ?
-  `).all(threshold);
-
-  if (overduePasses.length > 0) {
-    const updateStmt = db.prepare(`UPDATE gate_passes SET status = 'overdue' WHERE id = ?`);
-    const notifyStmt = db.prepare(`INSERT INTO notifications (recipient_id, type, message, hostel_id) VALUES (?, ?, ?, ?)`);
-    const selectWardens = db.prepare(`SELECT id FROM users WHERE role = 'warden' AND hostel_id = ?`);
-    
-    db.transaction(() => {
-      for (const pass of overduePasses) {
-        updateStmt.run(pass.id);
-        
-        const wardens = selectWardens.all(pass.hostel_id);
-        for(const w of wardens) {
-          notifyStmt.run(w.id, 'PASS_OVERDUE', `Pass #${pass.id} for Student ID ${pass.student_id} is overdue!`, pass.hostel_id);
-        }
-      }
-    })();
-    console.log(`[GatePass Service] ${overduePasses.length} passes flagged as overdue.`);
+  let count = 0;
+  for (const p of passesToUpdate) {
+     await db.execute(`UPDATE gate_passes SET status = 'overdue' WHERE id = ?`, [p.id]);
+     count++;
+     if (io) {
+       io.to(`hostel-${p.hostel_id}`).emit('gatepass_updated');
+     }
   }
+
+  console.log(`[GatePass Service] ${count} passes flagged as overdue.`);
 }
 
-/**
- * Scheduled job: Runs at 8:00 AM daily to flag passes with no return scan from the previous night.
- */
-function processUnresolved() {
-  console.log('[GatePass Service] Escalating unresolved overnight passes...');
+async function processUnresolved(io) {
+  console.log('[GatePass Service] Checking for unresolved passes from yesterday...');
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  
+  const [passesToUpdate] = await db.execute(`
+    SELECT id, hostel_id FROM gate_passes 
+    WHERE status IN ('active', 'overdue') AND expected_return < ?
+  `, [now]);
 
-  // Technically anything currently Overdue or Active at 8am could be considered unresolved 
-  // depending on the policy, but typically it applies to passes that missed curfew strictly.
-  const unresolvedPasses = db.prepare(`
-    SELECT id, student_id, hostel_id FROM gate_passes 
-    WHERE status IN ('active', 'overdue')
-  `).all();
-
-  if (unresolvedPasses.length > 0) {
-    const updateStmt = db.prepare(`UPDATE gate_passes SET status = 'unresolved' WHERE id = ?`);
-    const notifyStmt = db.prepare(`INSERT INTO notifications (recipient_id, type, message, hostel_id) VALUES (?, ?, ?, ?)`);
-    const selectWardens = db.prepare(`SELECT id FROM users WHERE role = 'warden' AND hostel_id = ?`);
-    
-    db.transaction(() => {
-      for (const pass of unresolvedPasses) {
-        updateStmt.run(pass.id);
-        
-        const wardens = selectWardens.all(pass.hostel_id);
-        for(const w of wardens) {
-          notifyStmt.run(w.id, 'PASS_UNRESOLVED', `Pass #${pass.id} for Student ID ${pass.student_id} escalated to unresolved from last night.`, pass.hostel_id);
-        }
-      }
-    })();
-    console.log(`[GatePass Service] ${unresolvedPasses.length} passes escalated to unresolved.`);
+  let count = 0;
+  for (const p of passesToUpdate) {
+     await db.execute(`UPDATE gate_passes SET status = 'unresolved' WHERE id = ?`, [p.id]);
+     count++;
+     if (io) {
+       io.to(`hostel-${p.hostel_id}`).emit('gatepass_updated');
+     }
   }
+
+  console.log(`[GatePass Service] ${count} passes escalated to unresolved.`);
 }
 
-/**
- * Verifies a pass token and returns preview data for the security guard to confirm.
- */
-function previewPassInfo(qrToken) {
+async function previewPassInfo(qrToken) {
   if (!qrToken) throw { status: 400, message: 'QR token required.' };
 
-  const pass = db.prepare(`
+  const [passes] = await db.execute(`
     SELECT gp.*, u.name as student_name, u.room_no
     FROM gate_passes gp
     JOIN users u ON gp.student_id = u.id
     WHERE gp.qr_token = ?
-  `).get(qrToken);
+  `, [qrToken]);
+  
+  const pass = passes[0];
 
   if (!pass) {
     throw { status: 404, message: 'Invalid or expired QR token.' };

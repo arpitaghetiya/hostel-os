@@ -10,7 +10,7 @@ const server = http.createServer(app);
 // Socket.io setup for real-time features (Module 4)
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: process.env.CLIENT_URL || 'http://localhost:3000',
     methods: ['GET', 'POST']
   }
 });
@@ -20,7 +20,7 @@ app.set('io', io);
 
 // ── Middleware ──────────────────────────────────
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
   credentials: true
 }));
 app.use(express.json());

@@ -1,9 +1,6 @@
 const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
-/**
- * Gets today's date formatted as YYYY-MM-DD
- */
 function getTodayString() {
   const now = new Date();
   const year = now.getFullYear();
@@ -12,35 +9,28 @@ function getTodayString() {
   return `${year}-${month}-${day}`;
 }
 
-/**
- * Generates a daily QR token for a hostel, or returns the existing one if already generated today.
- */
-function generateDailyQR(hostelId) {
+async function generateDailyQR(hostelId) {
   const today = getTodayString();
   
-  // Check if QR already exists for today
-  const existing = db.prepare('SELECT qr_token FROM daily_qr_codes WHERE hostel_id = ? AND date = ?').get(hostelId, today);
+  const [existing] = await db.execute('SELECT qr_token FROM daily_qr_codes WHERE hostel_id = ? AND date = ?', [hostelId, today]);
   
-  if (existing) {
-    return existing.qr_token;
+  if (existing.length > 0) {
+    return existing[0].qr_token;
   }
   
-  // Create a new QR token
   const newToken = uuidv4();
   
-  db.prepare(`
+  await db.execute(`
     INSERT INTO daily_qr_codes (hostel_id, date, qr_token)
     VALUES (?, ?, ?)
-  `).run(hostelId, today, newToken);
+  `, [hostelId, today, newToken]);
   
   return newToken;
 }
 
-/**
- * Marks attendance for a user based on scanning the daily QR code.
- */
-function markAttendance(userId, qrToken) {
-  const user = db.prepare('SELECT id, role, hostel_id FROM users WHERE id = ?').get(userId);
+async function markAttendance(userId, qrToken) {
+  const [users] = await db.execute('SELECT id, role, hostel_id FROM users WHERE id = ?', [userId]);
+  const user = users[0];
   
   if (!user || user.role !== 'student') {
     throw { status: 403, message: 'Only students can mark attendance.' };
@@ -48,24 +38,19 @@ function markAttendance(userId, qrToken) {
   
   const today = getTodayString();
   
-  // Verify token
-  const validToken = db.prepare('SELECT id FROM daily_qr_codes WHERE hostel_id = ? AND date = ? AND qr_token = ?').get(user.hostel_id, today, qrToken);
+  const [validTokens] = await db.execute('SELECT id FROM daily_qr_codes WHERE hostel_id = ? AND date = ? AND qr_token = ?', [user.hostel_id, today, qrToken]);
   
-  if (!validToken) {
+  if (validTokens.length === 0) {
     throw { status: 400, message: 'Invalid or expired QR code.' };
   }
   
-  // Check if already marked today
-  const existing = db.prepare('SELECT status FROM attendance WHERE user_id = ? AND date = ?').get(userId, today);
+  const [existing] = await db.execute('SELECT status FROM attendance WHERE user_id = ? AND date = ?', [userId, today]);
   
-  if (existing) {
-    throw { status: 400, message: `Already marked today as: ${existing.status}` };
+  if (existing.length > 0) {
+    throw { status: 400, message: `Already marked today as: ${existing[0].status}` };
   }
   
-  // Determine status (Before 9:30 PM is PRESENT, after is LATE)
   const now = new Date();
-  
-  // Create a Date object for 9:30 PM today (local server time representing expected behavior)
   const cutoffTime = new Date();
   cutoffTime.setHours(21, 30, 0, 0); 
   
@@ -74,100 +59,91 @@ function markAttendance(userId, qrToken) {
     status = 'late';
   }
   
-  const scannedAt = now.toISOString();
+  // Create MySQL compatible datetime string locally
+  const scannedAt = now.toISOString().slice(0, 19).replace('T', ' ');
   
-  // Insert attendance
-  db.prepare(`
+  await db.execute(`
     INSERT INTO attendance (user_id, date, scanned_at, status, hostel_id)
     VALUES (?, ?, ?, ?, ?)
-  `).run(userId, today, scannedAt, status, user.hostel_id);
+  `, [userId, today, scannedAt, status, user.hostel_id]);
   
-  // Log the action
-  db.prepare(`
+  await db.execute(`
     INSERT INTO logs (actor_id, action, target_user_id, hostel_id)
     VALUES (?, ?, ?, ?)
-  `).run(userId, 'MARKED_ATTENDANCE', userId, user.hostel_id);
+  `, [userId, 'MARKED_ATTENDANCE', userId, user.hostel_id]);
   
   return { status, scannedAt };
 }
 
-/**
- * Scheduled job to mark unmarked students as ABSENT or OUT_ON_PASS at 9:30 PM.
- */
-function processAbsentees(hostelId, io) {
+async function processAbsentees(hostelId, io) {
   const today = getTodayString();
-  
   console.log(`[Attendance Service] Processing absentees for hostel ${hostelId} for ${today}...`);
   
-  // Get all students for this hostel
-  const students = db.prepare(`SELECT id FROM users WHERE role = 'student' AND hostel_id = ?`).all(hostelId);
+  const [students] = await db.execute('SELECT id FROM users WHERE role = "student" AND hostel_id = ?', [hostelId]);
   
   let markedAbsent = 0;
   let markedOutOnPass = 0;
   
-  // In a real DB we'd do a batch insert/update, for SQLite this is fine.
-  const insertAttendance = db.prepare(`
-    INSERT INTO attendance (user_id, date, scanned_at, status, hostel_id, gate_pass_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
+  const connection = await db.getConnection();
+  await connection.beginTransaction();
   
-  const checkPass = db.prepare(`
-    SELECT id FROM gate_passes 
-    WHERE student_id = ? AND status = 'active'
-  `);
-  
-  db.transaction(() => {
+  try {
+    const timeNow = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
     for (const student of students) {
-      // Check if they have an attendance record today
-      const hasRecord = db.prepare('SELECT id FROM attendance WHERE user_id = ? AND date = ?').get(student.id, today);
+      const [hasRecord] = await connection.execute('SELECT id FROM attendance WHERE user_id = ? AND date = ?', [student.id, today]);
       
-      if (!hasRecord) {
-        // Check if out on pass
-        const activePass = checkPass.get(student.id);
+      if (hasRecord.length === 0) {
+        const [activePass] = await connection.execute(`SELECT id FROM gate_passes WHERE student_id = ? AND status = 'active'`, [student.id]);
         
-        if (activePass) {
-          insertAttendance.run(student.id, today, new Date().toISOString(), 'out_on_pass', hostelId, activePass.id);
+        if (activePass.length > 0) {
+          await connection.execute(`
+            INSERT INTO attendance (user_id, date, scanned_at, status, hostel_id, gate_pass_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `, [student.id, today, timeNow, 'out_on_pass', hostelId, activePass[0].id]);
           markedOutOnPass++;
         } else {
-          insertAttendance.run(student.id, today, new Date().toISOString(), 'absent', hostelId, null);
+          await connection.execute(`
+            INSERT INTO attendance (user_id, date, scanned_at, status, hostel_id, gate_pass_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `, [student.id, today, timeNow, 'absent', hostelId, null]);
           markedAbsent++;
           
-          // Notify wardens
-          const wardens = db.prepare(`SELECT id FROM users WHERE role = 'warden' AND hostel_id = ?`).all(hostelId);
-          const notify = db.prepare('INSERT INTO notifications (recipient_id, type, message, hostel_id) VALUES (?, ?, ?, ?)');
+          const [wardens] = await connection.execute('SELECT id FROM users WHERE role = "warden" AND hostel_id = ?', [hostelId]);
           for(const w of wardens) {
-              notify.run(w.id, 'ABSENT_ALERT', `Student ID ${student.id} was marked absent.`, hostelId);
+              await connection.execute('INSERT INTO notifications (recipient_id, type, message, hostel_id) VALUES (?, ?, ?, ?)', 
+              [w.id, 'ABSENT_ALERT', `Student ID ${student.id} was marked absent.`, hostelId]);
           }
         }
       }
     }
-  })();
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    console.error('Failed processing absentees:', err);
+  } finally {
+    connection.release();
+  }
   
   console.log(`[Attendance Service] Marked ${markedAbsent} absent, ${markedOutOnPass} out on pass.`);
   
-  // Emit WebSocket update to wardens in this hostel
   if (io) {
-    const stats = getTodayStats(hostelId);
+    const stats = await getTodayStats(hostelId);
     io.to(`hostel-${hostelId}`).emit('attendance_updated', stats);
   }
 }
 
-/**
- * Gets aggregated stats for today for Warden Dashboard
- */
-function getTodayStats(hostelId) {
+async function getTodayStats(hostelId) {
   const today = getTodayString();
   
-  // Total students
-  const totalStudentsRes = db.prepare(`SELECT COUNT(*) as count FROM users WHERE role = 'student' AND hostel_id = ?`).get(hostelId);
-  const totalStudents = totalStudentsRes ? totalStudentsRes.count : 0;
+  const [totalStudentsRes] = await db.execute(`SELECT COUNT(*) as count FROM users WHERE role = 'student' AND hostel_id = ?`, [hostelId]);
+  const totalStudents = totalStudentsRes[0].count;
   
-  // Get counts by status
-  const statsRes = db.prepare(`
+  const [statsRes] = await db.execute(`
     SELECT status, COUNT(*) as count FROM attendance 
     WHERE hostel_id = ? AND date = ?
     GROUP BY status
-  `).all(hostelId, today);
+  `, [hostelId, today]);
   
   const stats = {
     present: 0,
@@ -182,15 +158,14 @@ function getTodayStats(hostelId) {
     stats.unmarked -= row.count;
   }
   
-  // Also fetch recent activity (last 20 events)
-  const recentLogsRes = db.prepare(`
+  const [recentLogsRes] = await db.execute(`
     SELECT l.id, l.action, l.timestamp, u.name as actor_name, t.name as target_name
     FROM logs l
     LEFT JOIN users u ON l.actor_id = u.id
     LEFT JOIN users t ON l.target_user_id = t.id
     WHERE l.hostel_id = ?
     ORDER BY l.timestamp DESC LIMIT 20
-  `).all(hostelId);
+  `, [hostelId]);
   
   return { counts: stats, logs: recentLogsRes };
 }

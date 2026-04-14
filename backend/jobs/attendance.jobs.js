@@ -7,14 +7,14 @@ function initCronJobs(io) {
 
   // 1. Midnight QR Generation
   // Runs every day at 00:00 (Midnight)
-  cron.schedule('0 0 * * *', () => {
+  cron.schedule('0 0 * * *', async () => {
     console.log('[CRON] Running daily QR generation at midnight');
     try {
       // Get all unique hostels
-      const hostelsResult = db.prepare('SELECT DISTINCT hostel_id FROM users WHERE hostel_id IS NOT NULL').all();
+      const [hostelsResult] = await db.execute('SELECT DISTINCT hostel_id FROM users WHERE hostel_id IS NOT NULL');
       
       for (const row of hostelsResult) {
-        attendanceService.generateDailyQR(row.hostel_id);
+        await attendanceService.generateDailyQR(row.hostel_id);
         console.log(`[CRON] Generated QR for ${row.hostel_id}`);
       }
     } catch (err) {
@@ -24,13 +24,13 @@ function initCronJobs(io) {
 
   // 2. Auto-ABSENT Marking & Warden Alerts
   // Runs every day at 21:30 (9:30 PM)
-  cron.schedule('30 21 * * *', () => {
+  cron.schedule('30 21 * * *', async () => {
     console.log('[CRON] Running auto-absent job at 9:30 PM');
     try {
-      const hostelsResult = db.prepare('SELECT DISTINCT hostel_id FROM users WHERE hostel_id IS NOT NULL').all();
+      const [hostelsResult] = await db.execute('SELECT DISTINCT hostel_id FROM users WHERE hostel_id IS NOT NULL');
       
       for (const row of hostelsResult) {
-        attendanceService.processAbsentees(row.hostel_id, io);
+        await attendanceService.processAbsentees(row.hostel_id, io);
       }
     } catch (err) {
       console.error('[CRON] Failed to process absentees:', err);
@@ -38,15 +38,18 @@ function initCronJobs(io) {
   });
   
   // Ensure we have a QR code for today when server starts
-  try {
-    const hostelsResult = db.prepare('SELECT DISTINCT hostel_id FROM users WHERE hostel_id IS NOT NULL').all();
-    for (const row of hostelsResult) {
-      attendanceService.generateDailyQR(row.hostel_id);
+  // Ensure we have a QR code for today when server starts
+  (async () => {
+    try {
+      const [hostelsResult] = await db.execute('SELECT DISTINCT hostel_id FROM users WHERE hostel_id IS NOT NULL');
+      for (const row of hostelsResult) {
+        await attendanceService.generateDailyQR(row.hostel_id);
+      }
+      console.log('✅ Initial daily QRs verified/created');
+    } catch(e) {
+      console.error('Failed to init QRs:', e);
     }
-    console.log('✅ Initial daily QRs verified/created');
-  } catch(e) {
-    console.error('Failed to init QRs:', e);
-  }
+  })();
 }
 
 module.exports = { initCronJobs };

@@ -6,9 +6,9 @@ function initGatepassJobs(io) {
 
   // 1. Overdue Check
   // Runs every 15 minutes
-  cron.schedule('*/15 * * * *', () => {
+  cron.schedule('*/15 * * * *', async () => {
     try {
-      gatepassService.processOverdue();
+      await gatepassService.processOverdue();
       if (io) io.emit('gatepass_updated');
     } catch (err) {
       console.error('[CRON] Failed to process overdue passes:', err);
@@ -17,10 +17,10 @@ function initGatepassJobs(io) {
 
   // 2. Unresolved Escalation
   // Runs daily at 8:00 AM
-  cron.schedule('0 8 * * *', () => {
+  cron.schedule('0 8 * * *', async () => {
     console.log('[CRON] Running daily unresolved pass check at 8:00 AM');
     try {
-      gatepassService.processUnresolved();
+      await gatepassService.processUnresolved();
       if (io) io.emit('gatepass_updated');
     } catch (err) {
       console.error('[CRON] Failed to process unresolved passes:', err);

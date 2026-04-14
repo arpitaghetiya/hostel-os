@@ -8,9 +8,9 @@ const { authorize } = require('../middleware/roleCheck');
  * GET /api/gatepass/student
  * Fetch all gate passes for the logged-in student.
  */
-router.get('/student', authenticate, authorize('student'), (req, res) => {
+router.get('/student', authenticate, authorize('student'), async (req, res) => {
   try {
-    const passes = gatepassService.getStudentPasses(req.user.id);
+    const passes = await gatepassService.getStudentPasses(req.user.id);
     res.json(passes);
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve passes.' });
@@ -21,7 +21,7 @@ router.get('/student', authenticate, authorize('student'), (req, res) => {
  * POST /api/gatepass/request
  * Student requests a new gate pass.
  */
-router.post('/request', authenticate, authorize('student'), (req, res) => {
+router.post('/request', authenticate, authorize('student'), async (req, res) => {
   try {
     const { reason, expectedOut, expectedReturn } = req.body;
     
@@ -29,7 +29,7 @@ router.post('/request', authenticate, authorize('student'), (req, res) => {
       return res.status(400).json({ error: 'Reason, expected exit, and expected return are required.' });
     }
 
-    const result = gatepassService.requestPass(req.user.id, reason, expectedOut, expectedReturn);
+    const result = await gatepassService.requestPass(req.user.id, reason, expectedOut, expectedReturn);
     
     // Alert wardens via WebSocket
     const io = req.app.get('io');
@@ -49,9 +49,9 @@ router.post('/request', authenticate, authorize('student'), (req, res) => {
  * GET /api/gatepass/warden
  * Fetch all gate passes for a warden's hostel.
  */
-router.get('/warden', authenticate, authorize('warden'), (req, res) => {
+router.get('/warden', authenticate, authorize('warden'), async (req, res) => {
   try {
-    const passes = gatepassService.getWardenPasses(req.user.hostel_id);
+    const passes = await gatepassService.getWardenPasses(req.user.hostel_id);
     res.json(passes);
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve passes.' });
@@ -62,7 +62,7 @@ router.get('/warden', authenticate, authorize('warden'), (req, res) => {
  * POST /api/gatepass/approve
  * Warden approves or rejects a pass.
  */
-router.post('/approve', authenticate, authorize('warden'), (req, res) => {
+router.post('/approve', authenticate, authorize('warden'), async (req, res) => {
   try {
     const { passId, status, note } = req.body;
     
@@ -71,7 +71,7 @@ router.post('/approve', authenticate, authorize('warden'), (req, res) => {
     }
 
     const io = req.app.get('io');
-    const result = gatepassService.updatePassStatus(passId, req.user.id, status, note, io);
+    const result = await gatepassService.updatePassStatus(passId, req.user.id, status, note, io);
     
     if (io) {
       io.to(`hostel-${req.user.hostel_id}`).emit('gatepass_updated');
@@ -89,7 +89,7 @@ router.post('/approve', authenticate, authorize('warden'), (req, res) => {
  * POST /api/gatepass/scan
  * Security scans a student's QR to log exit/return.
  */
-router.post('/scan', authenticate, authorize('security'), (req, res) => {
+router.post('/scan', authenticate, authorize('security'), async (req, res) => {
   try {
     const { qrToken, action } = req.body; // action: 'exit' or 'return'
     
@@ -97,7 +97,7 @@ router.post('/scan', authenticate, authorize('security'), (req, res) => {
       return res.status(400).json({ error: 'QR token and action type required.' });
     }
 
-    const result = gatepassService.scanPass(qrToken, action);
+    const result = await gatepassService.scanPass(qrToken, action);
     
     const io = req.app.get('io');
     if (io) {
@@ -116,9 +116,9 @@ router.post('/scan', authenticate, authorize('security'), (req, res) => {
  * GET /api/gatepass/verify/:qrToken
  * Security scans a pass to preview the student details and next action.
  */
-router.get('/verify/:qrToken', authenticate, authorize('security'), (req, res) => {
+router.get('/verify/:qrToken', authenticate, authorize('security'), async (req, res) => {
   try {
-    const result = gatepassService.previewPassInfo(req.params.qrToken);
+    const result = await gatepassService.previewPassInfo(req.params.qrToken);
     res.json(result);
   } catch (err) {
     const status = err.status || 500;

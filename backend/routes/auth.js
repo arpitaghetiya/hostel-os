@@ -7,7 +7,7 @@ const { authenticate } = require('../middleware/auth');
  * POST /api/auth/register
  * Register a new user (student, warden, or security)
  */
-router.post('/register', (req, res) => {
+router.post('/register', async (req, res) => {
   try {
     const { name, email, password, role, room_no, hostel_id, phone } = req.body;
 
@@ -27,7 +27,7 @@ router.post('/register', (req, res) => {
       return res.status(400).json({ error: 'Invalid email format.' });
     }
 
-    const user = authService.register({ name, email, password, role, room_no, hostel_id, phone });
+    const user = await authService.register({ name, email, password, role, room_no, hostel_id, phone });
     res.status(201).json({ message: 'Registration successful.', user });
   } catch (err) {
     const status = err.status || 500;
@@ -40,7 +40,7 @@ router.post('/register', (req, res) => {
  * POST /api/auth/login
  * Login with email and password
  */
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -48,7 +48,7 @@ router.post('/login', (req, res) => {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
 
-    const result = authService.login({ email, password });
+    const result = await authService.login({ email, password });
     res.json(result);
   } catch (err) {
     const status = err.status || 500;
@@ -61,10 +61,10 @@ router.post('/login', (req, res) => {
  * POST /api/auth/refresh
  * Get a new access token using a refresh token
  */
-router.post('/refresh', (req, res) => {
+router.post('/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    const result = authService.refreshAccessToken(refreshToken);
+    const result = await authService.refreshAccessToken(refreshToken);
     res.json(result);
   } catch (err) {
     const status = err.status || 500;
@@ -77,10 +77,10 @@ router.post('/refresh', (req, res) => {
  * POST /api/auth/logout
  * Invalidate refresh token
  */
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    authService.logout(refreshToken);
+    await authService.logout(refreshToken);
     res.json({ message: 'Logged out successfully.' });
   } catch (err) {
     res.status(500).json({ error: 'Logout failed.' });
@@ -91,9 +91,9 @@ router.post('/logout', (req, res) => {
  * GET /api/auth/me
  * Get current user profile (protected)
  */
-router.get('/me', authenticate, (req, res) => {
+router.get('/me', authenticate, async (req, res) => {
   try {
-    const user = authService.getProfile(req.user.id);
+    const user = await authService.getProfile(req.user.id);
     res.json(user);
   } catch (err) {
     const status = err.status || 500;

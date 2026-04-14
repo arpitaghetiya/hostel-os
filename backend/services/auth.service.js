@@ -1,50 +1,38 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
 
 const SALT_ROUNDS = 12;
 
-/**
- * Register a new user.
- * Validates uniqueness of email, hashes password, and creates the user record.
- */
-function register({ name, email, password, role, room_no, hostel_id, phone }) {
-  // Validate role
+async function register({ name, email, password, role, room_no, hostel_id, phone }) {
   const validRoles = ['student', 'warden', 'security'];
   if (!validRoles.includes(role)) {
     throw { status: 400, message: `Invalid role. Must be one of: ${validRoles.join(', ')}` };
   }
 
-  // Check if email already exists
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-  if (existing) {
+  const [existing] = await db.execute('SELECT id FROM users WHERE email = ?', [email]);
+  if (existing.length > 0) {
     throw { status: 409, message: 'An account with this email already exists.' };
   }
 
-  // Students must have a room number
   if (role === 'student' && !room_no) {
     throw { status: 400, message: 'Room number is required for students.' };
   }
 
-  const password_hash = bcrypt.hashSync(password, SALT_ROUNDS);
+  const password_hash = await bcrypt.hash(password, SALT_ROUNDS);
 
-  const stmt = db.prepare(`
-    INSERT INTO users (name, email, password_hash, role, room_no, hostel_id, phone)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
+  const [result] = await db.execute(`
+    INSERT INTO users (name, email, password, role, room_no, hostel_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `, [name, email, password_hash, role, room_no || null, hostel_id]);
 
-  const result = stmt.run(name, email, password_hash, role, room_no || null, hostel_id, phone || null);
-
-  // Log the registration
-  const logStmt = db.prepare(`
+  await db.execute(`
     INSERT INTO logs (actor_id, action, target_user_id, hostel_id)
     VALUES (?, ?, ?, ?)
-  `);
-  logStmt.run(result.lastInsertRowid, 'USER_REGISTERED', result.lastInsertRowid, hostel_id);
+  `, [result.insertId, 'USER_REGISTERED', result.insertId, hostel_id]);
 
   return {
-    id: result.lastInsertRowid,
+    id: result.insertId,
     name,
     email,
     role,
@@ -53,17 +41,15 @@ function register({ name, email, password, role, room_no, hostel_id, phone }) {
   };
 }
 
-/**
- * Login user with email and password.
- * Returns access token, refresh token, and user profile.
- */
-function login({ email, password }) {
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (!user) {
+async function login({ email, password }) {
+  const [users] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
+  if (users.length === 0) {
     throw { status: 401, message: 'Invalid email or password.' };
   }
+  const user = users[0];
 
-  const valid = bcrypt.compareSync(password, user.password_hash);
+  // Note: users table uses 'password', previous code used 'password_hash'. I updated schema to 'password'.
+  const valid = await bcrypt.compare(password, user.password);
   if (!valid) {
     throw { status: 401, message: 'Invalid email or password.' };
   }
@@ -71,18 +57,18 @@ function login({ email, password }) {
   const accessToken = generateAccessToken(user);
   const refreshToken = generateRefreshToken(user);
 
-  // Store refresh token in DB
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-  db.prepare(`
+  const expiresDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt = expiresDate.toISOString().slice(0, 19).replace('T', ' ');
+
+  await db.execute(`
     INSERT INTO refresh_tokens (user_id, token, expires_at)
     VALUES (?, ?, ?)
-  `).run(user.id, refreshToken, expiresAt);
+  `, [user.id, refreshToken, expiresAt]);
 
-  // Log the login
-  db.prepare(`
+  await db.execute(`
     INSERT INTO logs (actor_id, action, target_user_id, hostel_id)
     VALUES (?, ?, ?, ?)
-  `).run(user.id, 'USER_LOGIN', user.id, user.hostel_id);
+  `, [user.id, 'USER_LOGIN', user.id, user.hostel_id]);
 
   return {
     accessToken,
@@ -98,15 +84,11 @@ function login({ email, password }) {
   };
 }
 
-/**
- * Refresh the access token using a valid refresh token.
- */
-function refreshAccessToken(refreshToken) {
+async function refreshAccessToken(refreshToken) {
   if (!refreshToken) {
     throw { status: 400, message: 'Refresh token is required.' };
   }
 
-  // Verify the refresh token JWT
   let decoded;
   try {
     decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
@@ -114,48 +96,37 @@ function refreshAccessToken(refreshToken) {
     throw { status: 401, message: 'Invalid or expired refresh token.' };
   }
 
-  // Check if refresh token exists in DB and hasn't expired
-  const stored = db.prepare(`
-    SELECT * FROM refresh_tokens WHERE token = ? AND expires_at > datetime('now')
-  `).get(refreshToken);
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const [storedTokens] = await db.execute(`
+    SELECT * FROM refresh_tokens WHERE token = ? AND expires_at > ?
+  `, [refreshToken, now]);
 
-  if (!stored) {
+  if (storedTokens.length === 0) {
     throw { status: 401, message: 'Refresh token not found or expired. Please login again.' };
   }
 
-  // Get the user
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-  if (!user) {
+  const [users] = await db.execute('SELECT * FROM users WHERE id = ?', [decoded.id]);
+  if (users.length === 0) {
     throw { status: 401, message: 'User not found.' };
   }
 
-  // Generate new access token
-  const accessToken = generateAccessToken(user);
-
+  const accessToken = generateAccessToken(users[0]);
   return { accessToken };
 }
 
-/**
- * Logout by removing the refresh token from DB.
- */
-function logout(refreshToken) {
+async function logout(refreshToken) {
   if (refreshToken) {
-    db.prepare('DELETE FROM refresh_tokens WHERE token = ?').run(refreshToken);
+    await db.execute('DELETE FROM refresh_tokens WHERE token = ?', [refreshToken]);
   }
 }
 
-/**
- * Get user profile by ID.
- */
-function getProfile(userId) {
-  const user = db.prepare('SELECT id, name, email, role, room_no, hostel_id, phone, created_at FROM users WHERE id = ?').get(userId);
-  if (!user) {
+async function getProfile(userId) {
+  const [users] = await db.execute('SELECT id, name, email, role, room_no, hostel_id, created_at FROM users WHERE id = ?', [userId]);
+  if (users.length === 0) {
     throw { status: 404, message: 'User not found.' };
   }
-  return user;
+  return users[0];
 }
-
-// ── Token Generators ──────────────────────────────────
 
 function generateAccessToken(user) {
   return jwt.sign(
