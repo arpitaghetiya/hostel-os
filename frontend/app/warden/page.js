@@ -109,62 +109,78 @@ function WardenLiveDashboard({ user }) {
       </div>
 
       {/* Status Overview */}
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-header">
-            <span className="stat-label">Present (inc. Late)</span>
-            <div className="stat-icon" style={{ background: 'var(--success-bg)', color: 'var(--success)' }}>✅</div>
-          </div>
-          <div className="stat-value" style={{ color: 'var(--status-present)' }}>{stats.present + stats.late !== '——' ? stats.present + stats.late : '—'}</div>
-          <div className="stat-label">{stats.late} arrived late (>9:30 PM)</div>
-        </div>
+      {/* Status Overview */}
+<div className="stats-grid">
+  <div className="stat-card">
+    <div className="stat-header">
+      <span className="stat-label">Present (inc. Late)</span>
+      <div className="stat-icon" style={{ background: 'var(--success-bg)', color: 'var(--success)' }}>✅</div>
+    </div>
+    <div className="stat-value" style={{ color: 'var(--status-present)' }}>
+      {stats.present + stats.late !== '——' ? stats.present + stats.late : '—'}
+    </div>
+    <div className="stat-label">{stats.late} arrived late (&gt;9:30 PM)</div>
+  </div>
 
-        <div className="stat-card">
-          <div className="stat-header">
-            <span className="stat-label">Absent</span>
-            <div className="stat-icon" style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}>❌</div>
-          </div>
-          <div className="stat-value" style={{ color: 'var(--status-absent)' }}>{stats.absent}</div>
-          <div className="stat-label">Marked absent</div>
-        </div>
-        
-        <div className="stat-card">
-          <div className="stat-header">
-            <span className="stat-label">Out on Pass</span>
-            <div className="stat-icon" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>🚶</div>
-          </div>
-          <div className="stat-value" style={{ color: 'var(--status-out-on-pass)' }}>{stats.out_on_pass}</div>
-          <div className="stat-label">On approved gate pass</div>
-        </div>
+  <div className="stat-card">
+    <div className="stat-header">
+      <span className="stat-label">Absent</span>
+      <div className="stat-icon" style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}>❌</div>
+    </div>
+    <div className="stat-value" style={{ color: 'var(--status-absent)' }}>{stats.absent}</div>
+    <div className="stat-label">Marked absent</div>
+  </div>
 
-        <div className="stat-card">
-          <div className="stat-header">
-            <span className="stat-label">Unmarked</span>
-            <div className="stat-icon" style={{ background: 'var(--warning-bg)', color: 'var(--warning)' }}>⏳</div>
-          </div>
-          <div className="stat-value" style={{ color: 'var(--status-late)' }}>{stats.unmarked}</div>
-          <div className="stat-label">Pending scan today</div>
-        </div>
+  <div className="stat-card">
+    <div className="stat-header">
+      <span className="stat-label">Out on Pass</span>
+      <div className="stat-icon" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>🚶</div>
+    </div>
+    <div className="stat-value" style={{ color: 'var(--status-out-on-pass)' }}>{stats.out_on_pass}</div>
+    <div className="stat-label">On approved gate pass</div>
+  </div>
+
+  <div className="stat-card">
+    <div className="stat-header">
+      <span className="stat-label">Unmarked</span>
+      <div className="stat-icon" style={{ background: 'var(--warning-bg)', color: 'var(--warning)' }}>⏳</div>
+    </div>
+    <div className="stat-value" style={{ color: 'var(--status-late)' }}>{stats.unmarked}</div>
+    <div className="stat-label">Pending scan today</div>
+  </div>
+
+  {/* ✅ FIXED: THESE MUST BE INSIDE stats-grid */}
+  <div className="stat-card">
+    <div className="stat-header">
+      <span className="stat-label">Active Passes</span>
+      <div className="stat-icon" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>🎟️</div>
+    </div>
+    <div className="stat-value">{activePasses}</div>
+    <div className="stat-label">Students currently outside</div>
+  </div>
+
+  <div className="stat-card">
+    <div className="stat-header">
+      <span className="stat-label">Overdue Alerts</span>
+      <div
+        className="stat-icon"
+        style={{
+          background: overdueAlerts.length > 0 ? 'var(--danger-bg)' : 'var(--bg-secondary)',
+          color: overdueAlerts.length > 0 ? 'var(--danger)' : 'var(--text-muted)'
+        }}
+      >
+        🚨
       </div>
-
-        <div className="stat-card">
-          <div className="stat-header">
-            <span className="stat-label">Active Passes</span>
-            <div className="stat-icon" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>🎟️</div>
-          </div>
-          <div className="stat-value">{activePasses}</div>
-          <div className="stat-label">Students currently outside</div>
-        </div>
-
-        <div className="stat-card">
-          <div className="stat-header">
-            <span className="stat-label">Overdue Alerts</span>
-            <div className="stat-icon" style={{ background: overdueAlerts.length > 0 ? 'var(--danger-bg)' : 'var(--bg-secondary)', color: overdueAlerts.length > 0 ? 'var(--danger)' : 'var(--text-muted)' }}>🚨</div>
-          </div>
-          <div className="stat-value" style={{ color: overdueAlerts.length > 0 ? 'var(--danger)' : 'inherit' }}>{overdueAlerts.length}</div>
-          <div className="stat-label">Requires immediate attention</div>
-        </div>
-      </div>
+    </div>
+    <div
+      className="stat-value"
+      style={{ color: overdueAlerts.length > 0 ? 'var(--danger)' : 'inherit' }}
+    >
+      {overdueAlerts.length}
+    </div>
+    <div className="stat-label">Requires immediate attention</div>
+  </div>
+</div>
 
       {/* Overdue Alerts Banner */}
       {overdueAlerts.length > 0 && (
