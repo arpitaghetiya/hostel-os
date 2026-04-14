@@ -3,8 +3,7 @@
  * Handles token refresh automatically on 401 responses.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
-
+const API_BASE = 'https://rimmed-expire-childhood.ngrok-free.dev/api';
 /**
  * Get stored auth tokens from localStorage.
  */
